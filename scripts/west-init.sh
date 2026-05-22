@@ -6,7 +6,7 @@ IMAGE="${IMAGE:-nfr-memfault-ncs:${NCS_VERSION}}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mkdir -p "${ROOT_DIR}/manifest" "${ROOT_DIR}/.home"
-WEST_INIT_CMD="if [ ! -d .west ]; then mkdir -p .west; printf '[manifest]\npath = manifest\nfile = west.yml\n' > .west/config; fi; west update"
+WEST_INIT_CMD="if [ ! -f .west/config ]; then mkdir -p .west; printf '[manifest]\npath = manifest\nfile = west.yml\n' > .west/config; fi; west update"
 
 docker run --rm \
   --entrypoint /bin/bash \

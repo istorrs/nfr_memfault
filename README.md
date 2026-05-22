@@ -1,10 +1,13 @@
 # nRF52840 Memfault BLE Gateway Skeleton
 
-This repository is a headless nRF Connect SDK workspace skeleton for an
-nRF52840 DK running Memfault over Bluetooth Low Energy. The application exposes
-Nordic's Memfault Diagnostic Service (MDS); an nRF Connect BLE gateway, such as
-nRF Connect Device Manager on a phone, bonds to the DK, reads Memfault chunks
-over BLE, and forwards them to Memfault Cloud.
+This repository is an nRF Connect SDK workspace with two applications running on
+nRF52840 DKs:
+
+- **`apps/sensor`** — BLE peripheral that exposes the Memfault Diagnostic Service
+  (MDS). A bonded BLE gateway reads Memfault chunks and forwards them to Memfault
+  Cloud.
+- **`apps/gateway`** — BLE central that scans for the sensor, bonds with it, and
+  (TODO) forwards Memfault chunks to the cloud via the MDS GATT client.
 
 The build flow is Docker-only. No VS Code or host-side Nordic toolchain install
 is required.
@@ -12,12 +15,8 @@ is required.
 ## Requirements
 
 - Docker
-- nRF52840 DK
-- J-Link USB access for flashing from Docker
+- Two nRF52840 DKs with J-Link USB access
 - Memfault project key
-- nRF Connect Device Manager or another BLE gateway that supports Memfault MDS
-
-No nRF7002 EK/shield is required for this baseline.
 
 ## One-time setup
 
@@ -26,24 +25,27 @@ No nRF7002 EK/shield is required for this baseline.
 ./scripts/west-init.sh
 ```
 
-`west-init.sh` downloads the nRF Connect SDK modules into this workspace.
-
 ## Build
 
+Store local build settings in `.build.env` (gitignored):
+
 ```sh
-MEMFAULT_PROJECT_KEY='your-memfault-project-key' ./scripts/build.sh
+MEMFAULT_PROJECT_KEY='your-memfault-project-key'
+JLINK_SENSOR=001050203503
+JLINK_GATEWAY=001050258833
 ```
 
-The default target is:
-
-- board: `nrf52840dk/nrf52840`
-- app: `apps/memfault_upload`
-- BLE name: `NFR_Memfault`
-
-Override build-time identity when needed:
+Then build both apps:
 
 ```sh
-MEMFAULT_PROJECT_KEY='...' DEVICE_ID='sensor-001' BT_DEVICE_NAME='NFR_Sensor_001' ./scripts/build.sh
+./scripts/build-all.sh
+```
+
+To build a single app:
+
+```sh
+APP=apps/sensor BUILD_DIR=build/sensor DEVICE_ID=nrf52840-sensor BT_DEVICE_NAME=NFR_Sensor ./scripts/build.sh
+APP=apps/gateway BUILD_DIR=build/gateway DEVICE_ID=nrf52840-gateway BT_DEVICE_NAME=NFR_Gateway ./scripts/build.sh
 ```
 
 ## Flash
@@ -52,49 +54,44 @@ MEMFAULT_PROJECT_KEY='...' DEVICE_ID='sensor-001' BT_DEVICE_NAME='NFR_Sensor_001
 ./scripts/flash.sh
 ```
 
-If two DKs are connected, pass a J-Link serial number:
-
-```sh
-./scripts/flash.sh build/memfault_upload 1050123456
-```
-
-The flash script runs Docker with USB access and calls `west flash` inside the
-container.
+Flashes both devices in parallel using `JLINK_SENSOR` → `build/sensor` and
+`JLINK_GATEWAY` → `build/gateway`. Both serials must be set in `.build.env`.
 
 ## Runtime
 
-On boot the app:
+**Sensor** on boot:
+1. Initializes Bluetooth and loads bonding state from flash.
+2. Advertises the MDS service UUID as `NFR_Sensor`.
+3. Accepts pairing/bonding from the gateway DK.
+4. Enables MDS access for the bonded peer.
 
-1. initializes Bluetooth,
-2. advertises the Memfault Diagnostic Service UUID,
-3. accepts pairing/bonding from the BLE gateway,
-4. enables MDS access for the bonded peer,
-5. lets the gateway collect Memfault chunks and forward them to Memfault Cloud.
+**Gateway** on boot:
+1. Initializes Bluetooth and loads bonding state from flash.
+2. Scans passively for a device advertising the MDS UUID.
+3. Connects, bonds (`BT_SECURITY_L2`), and logs the connection.
+4. MDS GATT client and chunk forwarding are TODO.
 
-The nRF52840 firmware does not upload directly to Memfault Cloud in this mode.
-The cloud transport runs on the gateway, which keeps Wi-Fi, TLS, DNS, and socket
-RAM out of the device firmware.
-
-The serial shell is enabled. Useful commands include:
+Both apps expose the **Zephyr shell** via the J-Link VCOM ports (ttyACM0/ttyACM2 on this host) — the default UART0 on P0.06 (TX) / P0.08 (RX) routed through the J-Link USB cable, 115200 8N1.
+Useful shell commands:
 
 ```text
-mflt help
+kernel uptime
+kernel version
+kernel threads
 kernel reboot cold
+mflt help
 ```
 
-Use the nRF Connect Device Manager app's Memfault or diagnostic upload flow to
-collect and forward chunks over BLE.
+**RTT** is required for debug logging and GDB. Connect the J-Link USB cable (used
+for flashing) and use a J-Link RTT viewer or `JLinkRTTLogger` to stream log output.
+GDB attaches via the same J-Link connection using `west debug` inside the Docker
+container.
 
 ## Notes
 
-- Wi-Fi, networking, TLS, certificate provisioning, and the Memfault HTTP uploader
-  are intentionally disabled in this baseline.
-- The Memfault project key is injected by the build script into
-  `.build-overlays/`; it is not committed.
-- The app directory is still named `memfault_upload` for continuity, but the
-  current transport is BLE MDS gateway upload, not direct device HTTP upload.
-- A verified dummy build used about 254 KB flash and 55 KB RAM on
-  `nrf52840dk/nrf52840`.
-- The planned next step is splitting this into `sensor` and `gateway`
-  applications. With only nRF52840 DKs, both sides can use BLE locally, while a
-  phone or Linux BLE gateway handles internet upload to Memfault Cloud.
+- Wi-Fi, networking, TLS, and the Memfault HTTP uploader are intentionally
+  excluded. Cloud upload is delegated to the gateway (phone or DK).
+- The Memfault project key is injected at build time into `.build-overlays/`
+  and is never committed.
+- `apps/memfault_upload` is retained as the original proof-of-concept baseline.
+
