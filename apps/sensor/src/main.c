@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <errno.h>
-
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
@@ -22,7 +20,11 @@ LOG_MODULE_REGISTER(nfr_sensor, CONFIG_LOG_DEFAULT_LEVEL);
 #define DEVICE_NAME     CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
+/* Holds the connection that has been granted MDS access (requires BT_SECURITY_L2). */
+static struct bt_conn *mds_conn;
 static uint8_t conn_count;
+
+static struct k_work adv_work;
 
 static const struct bt_data ad[] = {
 BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -33,31 +35,27 @@ static const struct bt_data sd[] = {
 BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
 };
 
-static void start_advertising(void)
+static void adv_work_handler(struct k_work *work)
 {
-int ret;
+int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 
-ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
-if (ret == -EALREADY) {
-return;
-}
-
-if (ret) {
-LOG_ERR("BLE advertising failed: %d", ret);
+if (err && err != -EALREADY) {
+LOG_ERR("BLE advertising failed: %d", err);
 return;
 }
 
 LOG_INF("Advertising as %s", DEVICE_NAME);
 }
 
-/* Allow any connected device to access the Memfault Diagnostic Service.
- * Data is forwarded to the cloud over HTTPS by the mobile app, so there
- * is no need to gate on BLE security level here.
- */
+static void advertising_start(void)
+{
+k_work_submit(&adv_work);
+}
+
+/* MDS access requires a bonded, encrypted connection (BT_SECURITY_L2). */
 static bool mds_access_enable(struct bt_conn *conn)
 {
-ARG_UNUSED(conn);
-return true;
+return mds_conn && (conn == mds_conn);
 }
 
 static const struct bt_mds_cb mds_cb = {
@@ -74,30 +72,66 @@ return;
 }
 
 conn_count++;
-LOG_INF("BLE connected (active connections: %u)", conn_count);
+LOG_INF("BLE connected (active: %u)", conn_count);
 
-/* Keep advertising so a second device can also connect. */
+/* Keep advertising so a second device can connect (gateway + phone). */
 if (conn_count < CONFIG_BT_MAX_CONN) {
-start_advertising();
+advertising_start();
 }
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-ARG_UNUSED(conn);
-
 LOG_INF("BLE disconnected: 0x%02x", reason);
 
 if (conn_count > 0) {
 conn_count--;
 }
 
-start_advertising();
+if (mds_conn == conn) {
+bt_conn_unref(mds_conn);
+mds_conn = NULL;
+}
+/* Advertising restarts in recycled_cb once connection object is freed. */
+}
+
+/* Called when the connection object is truly freed — safe to re-advertise. */
+static void recycled_cb(void)
+{
+advertising_start();
+}
+
+static void security_changed(struct bt_conn *conn, bt_security_t level,
+     enum bt_security_err err)
+{
+if (err) {
+LOG_ERR("BLE security failed: level %u err %d", level, err);
+return;
+}
+
+LOG_INF("Security level %u", level);
+
+if (level >= BT_SECURITY_L2 && !mds_conn) {
+mds_conn = bt_conn_ref(conn);
+LOG_INF("MDS enabled for bonded connection");
+}
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
-.connected    = connected,
-.disconnected = disconnected,
+.connected        = connected,
+.disconnected     = disconnected,
+.security_changed = security_changed,
+.recycled         = recycled_cb,
+};
+
+static void auth_cancel(struct bt_conn *conn)
+{
+ARG_UNUSED(conn);
+LOG_WRN("Pairing cancelled");
+}
+
+static struct bt_conn_auth_cb conn_auth_callbacks = {
+.cancel = auth_cancel,
 };
 
 static void pairing_complete(struct bt_conn *conn, bool bonded)
@@ -112,8 +146,6 @@ ARG_UNUSED(conn);
 LOG_ERR("Pairing failed: %d", reason);
 }
 
-static struct bt_conn_auth_cb conn_auth_callbacks;
-
 static struct bt_conn_auth_info_cb conn_auth_info_callbacks = {
 .pairing_complete = pairing_complete,
 .pairing_failed   = pairing_failed,
@@ -121,35 +153,40 @@ static struct bt_conn_auth_info_cb conn_auth_info_callbacks = {
 
 int main(void)
 {
-int ret;
+int err;
 
 LOG_INF("Starting NFR sensor %s", APP_VERSION_STRING);
 
-ret = bt_conn_auth_cb_register(&conn_auth_callbacks);
-if (ret) {
-LOG_ERR("Auth callback registration failed: %d", ret);
-return ret;
+err = bt_mds_cb_register(&mds_cb);
+if (err) {
+LOG_ERR("MDS callback registration failed: %d", err);
+return err;
 }
 
-ret = bt_conn_auth_info_cb_register(&conn_auth_info_callbacks);
-if (ret) {
-LOG_ERR("Auth info callback registration failed: %d", ret);
-return ret;
+err = bt_enable(NULL);
+if (err) {
+LOG_ERR("Bluetooth init failed: %d", err);
+return err;
 }
 
-bt_mds_cb_register(&mds_cb);
+err = bt_conn_auth_cb_register(&conn_auth_callbacks);
+if (err) {
+LOG_ERR("Auth callback registration failed: %d", err);
+return err;
+}
 
-ret = bt_enable(NULL);
-if (ret) {
-LOG_ERR("Bluetooth init failed: %d", ret);
-return ret;
+err = bt_conn_auth_info_cb_register(&conn_auth_info_callbacks);
+if (err) {
+LOG_ERR("Auth info callback registration failed: %d", err);
+return err;
 }
 
 if (IS_ENABLED(CONFIG_SETTINGS)) {
 settings_load();
 }
 
-start_advertising();
+k_work_init(&adv_work, adv_work_handler);
+advertising_start();
 
 return 0;
 }
