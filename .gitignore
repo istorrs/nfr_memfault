@@ -1,0 +1,26 @@
+# Keep this repository as a small source scaffold. The nRF Connect SDK,
+# Zephyr tree, modules, builds, caches, and local west metadata are recreated
+# by ./scripts/west-init.sh and ./scripts/build.sh.
+
+# Ignore every top-level entry by default.
+/*
+
+# Project metadata and documentation.
+!/.gitignore
+!/README.md
+!/VERSION
+!/west.yml
+
+# West manifest used to download the SDK into this workspace.
+!/manifest/
+!/manifest/**
+
+# Source applications.
+!/apps/
+!/apps/**
+
+# Docker and CLI automation.
+!/docker/
+!/docker/**
+!/scripts/
+!/scripts/**
