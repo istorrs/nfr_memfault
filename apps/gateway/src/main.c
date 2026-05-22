@@ -14,6 +14,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/shell/shell.h>
 
 #include <bluetooth/services/mds.h>
 
@@ -72,8 +73,7 @@ static void scan_recv(const struct bt_le_scan_recv_info *info, struct net_buf_si
 	int err = bt_conn_le_create(info->addr, BT_CONN_LE_CREATE_CONN,
 				    BT_LE_CONN_PARAM_DEFAULT, &sensor_conn);
 	if (err) {
-		LOG_ERR("Connect failed: %d — restarting scan", err);
-		bt_le_scan_start(BT_LE_SCAN_PASSIVE, NULL);
+		LOG_ERR("Connect failed: %d — run 'ble scan' to retry", err);
 	}
 }
 
@@ -92,6 +92,42 @@ static void start_scan(void)
 
 	LOG_INF("Scanning for NFR sensor (MDS UUID)...");
 }
+
+static int cmd_ble_scan(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (sensor_conn != NULL) {
+		shell_print(sh, "Already connected to sensor");
+		return 0;
+	}
+
+	start_scan();
+	return 0;
+}
+
+static int cmd_ble_disconnect(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (sensor_conn == NULL) {
+		shell_print(sh, "Not connected");
+		return 0;
+	}
+
+	bt_conn_disconnect(sensor_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(ble_cmds,
+	SHELL_CMD(scan, NULL, "Scan for and connect to NFR sensor", cmd_ble_scan),
+	SHELL_CMD(disconnect, NULL, "Disconnect from NFR sensor", cmd_ble_disconnect),
+	SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(ble, &ble_cmds, "BLE gateway commands", NULL);
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -112,7 +148,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	LOG_INF("Disconnected: 0x%02x", reason);
 	bt_conn_unref(sensor_conn);
 	sensor_conn = NULL;
-	start_scan();
+	LOG_INF("Run 'ble scan' to reconnect");
 }
 
 static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
@@ -181,7 +217,8 @@ int main(void)
 	}
 
 	bt_le_scan_cb_register(&scan_callbacks);
-	start_scan();
+
+	LOG_INF("Ready — run 'ble scan' to connect to sensor");
 
 	return 0;
 }

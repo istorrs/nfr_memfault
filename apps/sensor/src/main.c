@@ -22,7 +22,12 @@ LOG_MODULE_REGISTER(nfr_sensor, CONFIG_LOG_DEFAULT_LEVEL);
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
+/* Number of active connections — sensor supports up to CONFIG_BT_MAX_CONN (2).
+ * One slot for the gateway (primary app), one for a phone running nRF Connect
+ * (Memfault diagnostics upload). MDS access is gated on BT_SECURITY_L2.
+ */
 static struct bt_conn *mds_conn;
+static uint8_t conn_count;
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -68,12 +73,22 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 
-	LOG_INF("BLE connected");
+	conn_count++;
+	LOG_INF("BLE connected (active connections: %u)", conn_count);
+
+	/* Keep advertising so a second device can also connect. */
+	if (conn_count < CONFIG_BT_MAX_CONN) {
+		start_advertising();
+	}
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	LOG_INF("BLE disconnected: 0x%02x", reason);
+
+	if (conn_count > 0) {
+		conn_count--;
+	}
 
 	if (mds_conn == conn) {
 		bt_conn_unref(mds_conn);
